@@ -36,7 +36,7 @@ for (i = 0 ; i < DIM(sizes) ; i++, multiplier /= 1024) {
     if (size < multiplier)
         continue;
     if (size % multiplier == 0)
-        sprintf(result, "%" PRIu64 " %s", size / multiplier, sizes[i]);
+        sprintf(result, "%" PRIu64 ".0 %s", size / multiplier, sizes[i]);
     else
         sprintf(result, "%.1f %s", (float) size / multiplier, sizes[i]);
     return;

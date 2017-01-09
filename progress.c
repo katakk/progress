@@ -826,7 +826,7 @@ for (i = 0 ; i < result_count ; i++) {
 
     }
 
-    nprintf("[%5d] %s %s %.1f%% (%s / %s)",
+    nprintf("[%5d] %s %s\t%4.1f%% (%9s /%9s)",
         results[i].pid.pid,
         results[i].pid.name,
         results[i].fd.name,
