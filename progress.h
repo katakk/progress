@@ -28,8 +28,8 @@
 #define PROGRESS_VERSION         "0.13"
 
 #define PROC_PATH       "/proc"
-#define MAX_PIDS        32
-#define MAX_RESULTS     32
+#define MAX_PIDS        256
+#define MAX_RESULTS     256
 #define MAX_FD_PER_PID  512
 #define LINE_LEN        256
 
