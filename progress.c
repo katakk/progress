@@ -1,5 +1,5 @@
 /*
-   Copyright (C) 2015 Xfennec, CQFD Corp.
+   Copyright (C) 2016 Xfennec, CQFD Corp.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -31,6 +31,7 @@
 #include <stdarg.h>
 #include <curses.h>
 
+#include <wordexp.h>
 #include <getopt.h>
 
 #include <sys/ioctl.h>
@@ -51,20 +52,30 @@
 #include "sizes.h"
 #include "hlist.h"
 
-char *proc_names[] = {"cp", "mv", "dd", "tar", "gzip", "gunzip", "cat",
-    "grep", "fgrep", "egrep", "cut", "sort", "xz", "md5sum", "sha1sum",
-    "sha224sum", "sha256sum", "sha384sum", "sha512sum", "adb", "rsync", NULL
+char *proc_names[] = {"cp", "mv", "dd", "tar", "cat", "rsync",
+    "grep", "fgrep", "egrep", "cut", "sort", "md5sum", "sha1sum",
+    "sha224sum", "sha256sum", "sha384sum", "sha512sum", "adb",
+    "gzip", "gunzip", "bzip2", "bunzip2", "xz", "unxz", "lzma", "unlzma", "7z",
+    "zcat", "bzcat", "lzcat",
+    "split",
+    "gpg",
+    NULL
 };
 
+// static means initialized to 0/NULL (C standard, §6.7.8/10)
 static int proc_specifiq_name_cnt;
 static char **proc_specifiq_name;
+static int ignore_file_list_cnt;
+static char **ignore_file_list;
+static int proc_specifiq_pid_cnt;
+static pid_t *proc_specifiq_pid;
 
-pid_t proc_specifiq_pid = 0;
 signed char flag_quiet = 0;
 signed char flag_debug = 0;
 signed char flag_throughput = 0;
 signed char flag_monitor = 0;
-signed char flag_monitor_continous = 0;
+signed char flag_monitor_continuous = 0;
+signed char flag_open_mode = 0;
 double throughput_wait_secs = 1;
 
 WINDOW *mainwin;
@@ -84,7 +95,7 @@ void nprintf(char *format, ...)
 va_list args;
 
 va_start(args, format);
-if (flag_monitor || flag_monitor_continous)
+if (flag_monitor || flag_monitor_continuous)
     vw_printw(mainwin, format, args);
 else
     vprintf(format, args);
@@ -95,7 +106,7 @@ void nfprintf(FILE *file, char *format, ...) {
 va_list args;
 
 va_start(args, format);
-if (flag_monitor || flag_monitor_continous)
+if (flag_monitor || flag_monitor_continuous)
     vw_printw(mainwin, format, args);
 else
     vfprintf(file, format, args);
@@ -103,10 +114,20 @@ va_end(args);
 }
 
 void nperror(const char *s) {
-if (flag_monitor || flag_monitor_continous)
+if (flag_monitor || flag_monitor_continuous)
     printw("%s:%s", s, strerror(errno));
 else
     perror(s);
+}
+
+
+signed char is_ignored_file(char *str)
+{
+int i;
+for (i = 0 ; i < ignore_file_list_cnt ; i++)
+    if (!strcmp(ignore_file_list[i], str))
+        return 1;
+return 0;
 }
 
 #ifdef __APPLE__
@@ -116,7 +137,7 @@ char exe[MAXPATHLEN + 1];
 
 exe[0] = '\0';
 proc_name(pid, exe, sizeof(exe));
-if (strlen(exe) == 0)
+if (exe[0] == '\0')
     return 0;
 
 pid_list[0].pid = pid;
@@ -247,7 +268,10 @@ for(i = 0; i < numberOfProcFDs; i++) {
                 perror("sstat");
             continue;
         }
-        if(!S_ISREG(stat_buf.st_mode) && !S_ISBLK(stat_buf.st_mode))
+        if (!S_ISREG(stat_buf.st_mode) && !S_ISBLK(stat_buf.st_mode))
+            continue;
+
+        if (is_ignored_file(vnodeInfo.pvip.vip_path))
             continue;
 
         // OK, we've found a potential interesting file.
@@ -304,6 +328,9 @@ while ((direntp = readdir(proc)) != NULL) {
     if (stat(link_dest, &stat_buf) == -1)
         continue;
 
+    if (is_ignored_file(fullpath) || is_ignored_file(link_dest))
+        continue;
+
     // OK, we've found a potential interesting file.
 
     fd_list[count++] = atoi(direntp->d_name);
@@ -325,10 +352,12 @@ struct stat stat_buf;
 char fdpath[MAXPATHLEN + 1];
 char line[LINE_LEN];
 FILE *fp;
+int flags;
 #endif
 struct timezone tz;
 
 fd_info->num = fdnum;
+fd_info->mode = PM_NONE;
 
 #ifdef __APPLE__
 struct vnode_fdinfowithpath vnodeInfo;
@@ -395,7 +424,14 @@ if (S_ISBLK(stat_buf.st_mode)) {
 #ifdef __APPLE__
 fd_info->pos = vnodeInfo.pfi.fi_offset;
 gettimeofday(&fd_info->tv, &tz);
+if (vnodeInfo.pfi.fi_openflags & FREAD)
+    fd_info->mode = PM_READ;
+if (vnodeInfo.pfi.fi_openflags & FWRITE)
+    fd_info->mode = PM_WRITE;
+if (vnodeInfo.pfi.fi_openflags & FREAD && vnodeInfo.pfi.fi_openflags & FWRITE)
+    fd_info->mode = PM_READWRITE;
 #else
+flags = 0;
 fd_info->pos = 0;
 
 snprintf(fdpath, MAXPATHLEN, "%s/%d/fdinfo/%d", PROC_PATH, pid, fdnum);
@@ -409,12 +445,19 @@ if (!fp) {
 }
 
 while (fgets(line, LINE_LEN - 1, fp) != NULL) {
-    line[4]=0;
-    if (!strcmp(line, "pos:")) {
+    if (!strncmp(line, "pos:", 4))
         fd_info->pos = atoll(line + 5);
-        break;
-    }
+    if (!strncmp(line, "flags:", 6))
+        flags = atoll(line + 7);
 }
+
+if ((flags & O_ACCMODE) == O_RDONLY)
+    fd_info->mode = PM_READ;
+if ((flags & O_ACCMODE) == O_WRONLY)
+    fd_info->mode = PM_WRITE;
+if ((flags & O_ACCMODE) == O_RDWR)
+    fd_info->mode = PM_READWRITE;
+
 fclose(fp);
 #endif
 return 1;
@@ -442,22 +485,27 @@ for ( ; i < char_available ; i++)
 void parse_options(int argc, char *argv[])
 {
 static struct option long_options[] = {
-    {"version",           no_argument,       0, 'v'},
-    {"quiet",             no_argument,       0, 'q'},
-    {"debug",             no_argument,       0, 'd'},
-    {"wait",              no_argument,       0, 'w'},
-    {"wait-delay",        required_argument, 0, 'W'},
-    {"monitor",           no_argument,       0, 'm'},
-    {"monitor-continous", no_argument,       0, 'M'},
-    {"help",              no_argument,       0, 'h'},
-    {"command",           required_argument, 0, 'c'},
-    {"pid",               required_argument, 0, 'p'},
+    {"version",              no_argument,       0, 'v'},
+    {"quiet",                no_argument,       0, 'q'},
+    {"debug",                no_argument,       0, 'd'},
+    {"wait",                 no_argument,       0, 'w'},
+    {"wait-delay",           required_argument, 0, 'W'},
+    {"monitor",              no_argument,       0, 'm'},
+    {"monitor-continuously", no_argument,       0, 'M'},
+    {"help",                 no_argument,       0, 'h'},
+    {"command",              required_argument, 0, 'c'},
+    {"pid",                  required_argument, 0, 'p'},
+    {"ignore-file",          required_argument, 0, 'i'},
+    {"open-mode",            required_argument, 0, 'o'},
     {0, 0, 0, 0}
 };
 
-static char *options_string = "vqdwmMhc:p:W:";
+static char *options_string = "vqdwmMhc:p:W:i:o:";
 int c,i;
 int option_index = 0;
+char *rp;
+
+optind = 1; // reset getopt
 
 while(1) {
     c = getopt_long (argc, argv, options_string, long_options, &option_index);
@@ -475,23 +523,26 @@ while(1) {
         case 'h':
             printf("progress - Coreutils Viewer\n");
             printf("---------------------\n");
-            printf("Shows running coreutils basic commands and displays stats.\n\n");
-            printf("Commands monitored by default:\n");
+            printf("Shows progress on file manipulations (cp, mv, dd, ...)\n\n");
+            printf("Monitored commands (default):\n");
             for(i = 0 ; proc_names[i] ; i++)
                 printf("%s ", proc_names[i]);
             printf("\n\n");
             printf("Usage: %s [-qdwmM] [-W secs] [-c command] [-p pid]\n",argv[0]);
-            printf("  -q --quiet              hides all messages\n");
-            printf("  -d --debug              shows all warning/error messages\n");
-            printf("  -w --wait               estimate I/O throughput and ETA (slower display)\n");
-            printf("  -W --wait-delay secs    wait 'secs' seconds for I/O estimation (implies -w, default=%.1f)\n", throughput_wait_secs);
-            printf("  -m --monitor            loop while monitored processes are still running\n");
-            printf("  -M --monitor-continous  like monitor but never stop (similar to watch %s)\n", argv[0]);
-            printf("  -c --command cmd        monitor only this command name (ex: firefox)\n");
-            printf("  -p --pid id             monitor only this process ID (ex: `pidof firefox`)\n");
-            printf("  -v --version            show program version and exit\n");
-            printf("  -h --help               display this help and exit\n");
-
+            printf("  -q --quiet                 hides all messages\n");
+            printf("  -d --debug                 shows all warning/error messages\n");
+            printf("  -w --wait                  estimate I/O throughput and ETA (slower display)\n");
+            printf("  -W --wait-delay secs       wait 'secs' seconds for I/O estimation (implies -w, default=%.1f)\n", throughput_wait_secs);
+            printf("  -m --monitor               loop while monitored processes are still running\n");
+            printf("  -M --monitor-continuously  like monitor but never stop (similar to watch %s)\n", argv[0]);
+            printf("  -c --command cmd           monitor only this command name (ex: firefox)\n");
+            printf("  -p --pid id                monitor only this process ID (ex: `pidof firefox`)\n");
+            printf("  -i --ignore-file file      do not report process if using file\n");
+            printf("  -o --open-mode {r|w}       report only files opened for read or write\n");
+            printf("  -v --version               show program version and exit\n");
+            printf("  -h --help                  display this help and exit\n");
+            printf("\n\n");
+            printf("Multiple options allowed for: -c -p -i. Use PROGRESS_ARGS for permanent arguments.\n");
             exit(EXIT_SUCCESS);
             break;
 
@@ -503,14 +554,26 @@ while(1) {
             flag_debug = 1;
             break;
 
+        case 'i':
+            rp = realpath(optarg, NULL);
+            ignore_file_list_cnt++;
+            ignore_file_list = realloc(ignore_file_list, ignore_file_list_cnt * sizeof(char *));
+            if (rp)
+                ignore_file_list[ignore_file_list_cnt - 1] = rp;
+            else
+                ignore_file_list[ignore_file_list_cnt - 1] = strdup(optarg); // file does not exist yet, it seems
+            break;
+
         case 'c':
             proc_specifiq_name_cnt++;
-            proc_specifiq_name = realloc(proc_specifiq_name, proc_specifiq_name_cnt * sizeof(proc_specifiq_name[0]));
+            proc_specifiq_name = realloc(proc_specifiq_name, proc_specifiq_name_cnt * sizeof(char *));
             proc_specifiq_name[proc_specifiq_name_cnt - 1] = strdup(optarg);
             break;
 
         case 'p':
-            proc_specifiq_pid = atof(optarg);
+            proc_specifiq_pid_cnt++;
+            proc_specifiq_pid = realloc(proc_specifiq_pid, proc_specifiq_pid_cnt * sizeof(pid_t));
+            proc_specifiq_pid[proc_specifiq_pid_cnt - 1] = atof(optarg);
             break;
 
         case 'w':
@@ -522,12 +585,23 @@ while(1) {
             break;
 
         case 'M':
-            flag_monitor_continous = 1;
+            flag_monitor_continuous = 1;
             break;
 
         case 'W':
             flag_throughput = 1;
             throughput_wait_secs = atof(optarg);
+            break;
+
+        case 'o':
+            if (!strcmp("r", optarg))
+                flag_open_mode = PM_READ;
+            else if (!strcmp("w", optarg))
+                flag_open_mode = PM_WRITE;
+            else {
+                fprintf(stderr,"Invalid --open-mode option value '%s'.\n", optarg);
+                exit(EXIT_FAILURE);
+            }
             break;
 
         case '?':
@@ -545,11 +619,16 @@ if (optind < argc) {
 
 void print_eta(time_t seconds)
 {
-struct tm *p = gmtime(&seconds);
+struct tm *p;
 
-nprintf(" eta ");
+if (!seconds)
+    return;
+
+p = gmtime(&seconds);
+
+nprintf(" remaining ");
 if (p->tm_yday)
-    nprintf("%d day%s, ", p->tm_yday, p->tm_yday > 1 ? "s" : "");
+    nprintf("%d day%s ", p->tm_yday, p->tm_yday > 1 ? "s" : "");
 nprintf("%d:%02d:%02d", p->tm_hour, p->tm_min, p->tm_sec);
 }
 
@@ -598,21 +677,38 @@ float perc;
 result_t results[MAX_RESULTS];
 signed char still_there;
 signed char search_all = 1;
+static signed char first_pass = 1;
 
 pid_count = 0;
 
+if (!flag_monitor && !flag_monitor_continuous)
+    first_pass = 0;
+
+
 if (proc_specifiq_name_cnt) {
-    for (i = 0; i < proc_specifiq_name_cnt; ++i)
+    search_all = 0;
+    for (i = 0 ; i < proc_specifiq_name_cnt ; ++i) {
         pid_count += find_pids_by_binary_name(proc_specifiq_name[i],
                                               pidinfo_list + pid_count,
                                               MAX_PIDS - pid_count);
-    search_all = 0;
+        if(pid_count >= MAX_PIDS) {
+            nfprintf(stderr, "Found too much procs (max = %d)\n",MAX_PIDS);
+            return 0;
+        }
+    }
 }
 
 if (proc_specifiq_pid) {
-    pid_count += find_pid_by_id(proc_specifiq_pid,
-                                  pidinfo_list + pid_count);
     search_all = 0;
+    for (i = 0 ; i < proc_specifiq_pid_cnt ; ++i) {
+        pid_count += find_pid_by_id(proc_specifiq_pid[i],
+                                    pidinfo_list + pid_count);
+
+        if(pid_count >= MAX_PIDS) {
+            nfprintf(stderr, "Found too much procs (max = %d)\n",MAX_PIDS);
+            return 0;
+        }
+    }
 }
 
 if (search_all) {
@@ -622,7 +718,7 @@ if (search_all) {
                                               MAX_PIDS - pid_count);
         if(pid_count >= MAX_PIDS) {
             nfprintf(stderr, "Found too much procs (max = %d)\n",MAX_PIDS);
-            break;
+            return 0;
         }
     }
 }
@@ -632,15 +728,31 @@ if (search_all) {
 if (!pid_count) {
     if (flag_quiet)
         return 0;
-    if (flag_monitor || flag_monitor_continous) {
+    if (flag_monitor || flag_monitor_continuous) {
         clear();
 	refresh();
     }
-    nfprintf(stderr,"No command currently running: ");
-    for (i = 0 ; proc_names[i] ; i++) {
-        nfprintf(stderr,"%s%c ", proc_names[i], (proc_names[i+1]?',':'.'));
+    if (proc_specifiq_pid_cnt) {
+        nfprintf(stderr, "No such pid: ");
+        for (i = 0 ; i < proc_specifiq_pid_cnt; ++i) {
+            nfprintf(stderr, "%d, ", proc_specifiq_pid[i]);
+        }
     }
-    nfprintf(stderr,"\nExiting.\n");
+    if (proc_specifiq_name_cnt)
+    {
+        nfprintf(stderr, "No such command(s) running: ");
+        for (i = 0 ; i < proc_specifiq_name_cnt; ++i) {
+            nfprintf(stderr, "%s, ", proc_specifiq_name[i]);
+        }
+    }
+    if (!proc_specifiq_pid && !proc_specifiq_name_cnt) {
+        nfprintf(stderr,"No command currently running: ");
+        for (i = 0 ; proc_names[i] ; i++) {
+            nfprintf(stderr,"%s, ", proc_names[i]);
+        }
+    }
+    nfprintf(stderr,"or wrong permissions.\n");
+    first_pass = 0;
     return 0;
 }
 
@@ -655,6 +767,11 @@ for (i = 0 ; i < pid_count ; i++) {
     for (j = 0 ; j < fd_count ; j++) {
         get_fdinfo(pidinfo_list[i].pid, fdnum_list[j], &fdinfo);
 
+        if (flag_open_mode == PM_READ && fdinfo.mode != PM_READ && fdinfo.mode != PM_READWRITE)
+            continue;
+        if (flag_open_mode == PM_WRITE && fdinfo.mode != PM_WRITE && fdinfo.mode != PM_READWRITE)
+            continue;
+
         if (fdinfo.size > max_size) {
             biggest_fd = fdinfo;
             max_size = fdinfo.size;
@@ -662,9 +779,11 @@ for (i = 0 ; i < pid_count ; i++) {
     }
 
     if (!max_size) { // nothing found
-        nprintf("[%5d] %s inactive/flushing/streaming/...\n",
+    // this display is the root of too many confusion for the users, let's
+    // remove it. And it does not play well with --i option.
+/*        nprintf("[%5d] %s inactive/flushing/streaming/...\n",
                 pidinfo_list[i].pid,
-                pidinfo_list[i].name);
+                pidinfo_list[i].name);*/
         continue;
     }
 
@@ -679,15 +798,15 @@ for (i = 0 ; i < pid_count ; i++) {
 }
 
 // wait a bit, so we can estimate the throughput
-if (flag_throughput)
+if (flag_throughput && !first_pass)
     usleep(1000000 * throughput_wait_secs);
-if (flag_monitor || flag_monitor_continous) {
+if (flag_monitor || flag_monitor_continuous) {
     clear();
 }
 copy_and_clean_results(results, result_count, 1);
 for (i = 0 ; i < result_count ; i++) {
 
-    if (flag_throughput) {
+    if (flag_throughput && !first_pass) {
         still_there = get_fdinfo(results[i].pid.pid, results[i].fd.num, &fdinfo);
         if (still_there && strcmp(results[i].fd.name, fdinfo.name))
             still_there = 0; // still there, but it's not the same file !
@@ -707,7 +826,7 @@ for (i = 0 ; i < result_count ; i++) {
 
     }
 
-    nprintf("[%5d] %s %s %.1f%% (%s / %s)",
+    nprintf("[%5d] %s %s\n\t%.1f%% (%s / %s)",
         results[i].pid.pid,
         results[i].pid.name,
         results[i].fd.name,
@@ -715,7 +834,7 @@ for (i = 0 ; i < result_count ; i++) {
         fpos,
         fsize);
 
-    if (flag_throughput && still_there) {
+    if (flag_throughput && still_there && !first_pass) {
         // results[i] vs fdinfo
         long long usec_diff;
         off_t byte_diff;
@@ -729,44 +848,66 @@ for (i = 0 ; i < result_count ; i++) {
 
         format_size(bytes_per_sec, ftroughput);
         nprintf(" %s/s", ftroughput);
-        if (bytes_per_sec && fdinfo.size - fdinfo.pos > 0) {
+        if (bytes_per_sec && fdinfo.size - fdinfo.pos >= 0) {
             print_eta((fdinfo.size - fdinfo.pos) / bytes_per_sec);
         }
     }
 
 
-    nprintf("\n");
+    nprintf("\n\n");
 
     // Need to work on window width when using screen/watch/...
     //~ printf("    [");
     //~ print_bar(perc, ws.ws_col-6);
     //~ printf("]\n");
 }
-if (flag_monitor || flag_monitor_continous) {
+if (flag_monitor || flag_monitor_continuous) {
+    if (!result_count)
+        nprintf("No PID(s) currently monitored\n");
     refresh();
 }
 copy_and_clean_results(results, result_count, 0);
+first_pass = 0;
 return 0;
 }
 
 void int_handler(int sig)
 {
-if(flag_monitor || flag_monitor_continous)
+if(flag_monitor || flag_monitor_continuous)
     endwin();
 exit(0);
 }
-
 
 int main(int argc, char *argv[])
 {
 pid_t nb_pid;
 struct winsize ws;
+wordexp_t env_wordexp;
+char *env_progress_args;
+char *env_progress_args_full;
 
+env_progress_args = getenv("PROGRESS_ARGS");
+
+if (env_progress_args) {
+    int full_len;
+
+    // prefix with (real) argv[0]
+    // argv[0] + ' ' + env_progress_args + '\0'
+    full_len = strlen(argv[0]) + 1 + strlen(env_progress_args) + 1;
+    env_progress_args_full = malloc(full_len * sizeof(char));
+    sprintf(env_progress_args_full, "%s %s", argv[0], env_progress_args);
+
+    if (wordexp(env_progress_args_full, &env_wordexp, 0)) {
+        fprintf(stderr,"Unable to parse PROGRESS_ARGS environment variable.\n");
+        exit(EXIT_FAILURE);
+    }
+    parse_options(env_wordexp.we_wordc,env_wordexp.we_wordv);
+}
 parse_options(argc,argv);
 
 // ws.ws_row, ws.ws_col
 ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws);
-if (flag_monitor || flag_monitor_continous) {
+if (flag_monitor || flag_monitor_continuous) {
     if ((mainwin = initscr()) == NULL ) {
         fprintf(stderr, "Error initialising ncurses.\n");
         exit(EXIT_FAILURE);
@@ -780,10 +921,10 @@ if (flag_monitor || flag_monitor_continous) {
     do {
         monitor_processes(&nb_pid);
         refresh();
-        if(flag_monitor_continous && !nb_pid) {
+        if(flag_monitor_continuous && !nb_pid) {
           usleep(1000000 * throughput_wait_secs);
         }
-    } while ((flag_monitor && nb_pid) || flag_monitor_continous);
+    } while ((flag_monitor && nb_pid) || flag_monitor_continuous);
     endwin();
 }
 else {

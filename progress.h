@@ -1,5 +1,5 @@
 /*
-   Copyright (C) 2015 Xfennec, CQFD Corp.
+   Copyright (C) 2016 Xfennec, CQFD Corp.
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -25,19 +25,24 @@
 
 #include "hlist.h"
 
-#define PROGRESS_VERSION         "0.9"
+#define PROGRESS_VERSION         "0.13"
 
 #define PROC_PATH       "/proc"
 #define MAX_PIDS        32
 #define MAX_RESULTS     32
 #define MAX_FD_PER_PID  512
 #define LINE_LEN        256
-//~ #define MINMUM_SIZE     8192
+
+#define PM_NONE         0
+#define PM_READ         1   // read only
+#define PM_WRITE        2   // write only
+#define PM_READWRITE    4
 
 typedef struct fdinfo_t {
     int num;
     off_t size;
     off_t pos;
+    signed char mode;
     char name[MAXPATHLEN + 1];
     struct timeval tv;
 } fdinfo_t;
