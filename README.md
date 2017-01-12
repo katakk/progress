@@ -1,4 +1,4 @@
-progress - Coreutils Progress Viewer [![Build Status](https://travis-ci.org/Xfennec/progress.svg?branch=master)](https://travis-ci.org/Xfennec/progress)
+progress - Coreutils Progress Viewer [![Build Status](https://travis-ci.org/katakk/progress.svg?branch=master)](https://travis-ci.org/katakk/progress)
 =====================
 
 What is it?
