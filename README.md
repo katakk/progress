@@ -1,4 +1,4 @@
-progress - Coreutils Progress Viewer [![Build Status](https://travis-ci.org/katakk/progress.svg?branch=master)](https://travis-ci.org/katakk/progress)
+progress - Coreutils Progress Viewer [![Build Status](https://travis-ci.org/katakk/progress.svg?branch=master)](https://travis-ci.org/katakk/progress) [![coverity](https://scan.coverity.com/projects/11536/badge.svg)](https://scan.coverity.com/projects/katakk-progress)
 =====================
 
 What is it?
